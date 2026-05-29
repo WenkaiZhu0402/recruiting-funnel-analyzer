@@ -243,7 +243,9 @@ const ROLE_OPTIONS = [
   "跨境电商运营实习生",
   "待人工确认",
 ];
-const STAGE_OPTIONS = ["投递", "初筛", "一面", "二面", "Offer", "入职", "淘汰"];
+const STAGE_OPTIONS = ["投递", "初筛", "一面", "二面", "Offer", "入职", "面试中", "淘汰"];
+const SOURCE_OPTIONS = ["BOSS直聘", "猎聘", "LinkedIn", "实习僧", "内推", "智联招聘", "前程无忧", "校招官网", "微信社群"];
+const RECRUITER_OPTIONS = [...SAMPLE_RECRUITERS, "招聘团队"];
 const LOCAL_STORAGE_KEY = "recruiting-funnel-analyzer-data-v2";
 const STAGE_DISPLAY = {
   Applied: "投递",
@@ -469,11 +471,16 @@ function mapInputRow(row) {
 }
 
 function normalizeRow(row) {
-  return REQUIRED_COLUMNS.reduce((acc, key) => {
-    const value = row[key];
-    acc[key] = DATE_COLUMNS.includes(key) ? normalizeDate(value) : String(value ?? "").trim();
+  const extras = Object.entries(row || {}).reduce((acc, [key, value]) => {
+    if (!REQUIRED_COLUMNS.includes(key)) acc[key] = value;
     return acc;
   }, {});
+
+  return REQUIRED_COLUMNS.reduce((acc, key) => {
+    const value = row?.[key];
+    acc[key] = DATE_COLUMNS.includes(key) ? normalizeDate(value) : String(value ?? "").trim();
+    return acc;
+  }, extras);
 }
 
 function prepareImportedRows(rawRows = []) {
@@ -484,7 +491,7 @@ function prepareImportedRows(rawRows = []) {
     .filter((row) => row.candidate_id || row.name)
     .map((row, index) => ({
       ...row,
-      candidate_id: row.candidate_id || `I-${String(index + 1).padStart(4, "0")}`,
+      candidate_id: row.candidate_id || `C-${String(index + 1).padStart(4, "0")}`,
       name: row.name || `Candidate ${String(index + 1).padStart(3, "0")}`,
       source: normalizeSource(row.source),
       current_stage: normalizeStageValue(row.current_stage),
@@ -497,6 +504,72 @@ function missingColumnsFromHeaders(headers = []) {
   const safeHeaders = Array.isArray(headers) ? headers : [];
   const normalized = new Set(safeHeaders.map(normalizeHeader));
   return REQUIRED_COLUMNS.filter((column) => !normalized.has(column));
+}
+
+function maxCandidateNumber(rows = []) {
+  return rows.reduce((max, row) => {
+    const match = String(row?.candidate_id || "").match(/^C-(\d+)$/i);
+    return match ? Math.max(max, Number(match[1])) : max;
+  }, 0);
+}
+
+function formatCandidateId(number) {
+  return `C-${String(number).padStart(4, "0")}`;
+}
+
+function ensureUniqueCandidateIds(rows = [], existingRows = []) {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  const usedIds = new Set(
+    (Array.isArray(existingRows) ? existingRows : [])
+      .map((row) => String(row?.candidate_id || "").trim())
+      .filter(Boolean)
+  );
+  let nextNumber = Math.max(maxCandidateNumber(existingRows), maxCandidateNumber(safeRows)) + 1;
+
+  return safeRows.map((row) => {
+    const currentId = String(row?.candidate_id || "").trim();
+    let candidateId = currentId;
+
+    if (!candidateId || usedIds.has(candidateId)) {
+      do {
+        candidateId = formatCandidateId(nextNumber);
+        nextNumber += 1;
+      } while (usedIds.has(candidateId));
+    }
+
+    usedIds.add(candidateId);
+    return { ...row, candidate_id: candidateId };
+  });
+}
+
+function duplicateText(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function parsedCandidateDuplicateKey(candidate) {
+  const name = duplicateText(candidate?.name);
+  const fileName = duplicateText(candidate?.file_name);
+  const role = duplicateText(candidate?.suggested_role);
+  const secondary = fileName && fileName !== duplicateText("待确认") ? fileName : role;
+  return name && secondary ? `${name}::${secondary}` : "";
+}
+
+function ledgerCandidateDuplicateKey(row) {
+  if (row?.ai_duplicate_key) return String(row.ai_duplicate_key);
+  const name = duplicateText(row?.name);
+  const fileName = duplicateText(row?.ai_source_file || row?.file_name);
+  const role = duplicateText(row?.role);
+  const secondary = fileName && fileName !== duplicateText("待确认") ? fileName : role;
+  return name && secondary ? `${name}::${secondary}` : "";
+}
+
+function ledgerDuplicateKeySet(rows = []) {
+  return new Set((Array.isArray(rows) ? rows : []).map(ledgerCandidateDuplicateKey).filter(Boolean));
+}
+
+function optionListWithCurrent(options, currentValue) {
+  const cleanValue = String(currentValue || "").trim();
+  return cleanValue && !options.includes(cleanValue) ? [cleanValue, ...options] : options;
 }
 
 function parsePastedTable(text) {
@@ -796,6 +869,7 @@ function stageClassName(stage) {
     二面: "stage-interview2",
     Offer: "stage-offer",
     入职: "stage-hired",
+    面试中: "stage-interview1",
     淘汰: "stage-rejected",
   };
   return `stage-badge ${classMap[label] || "stage-unknown"}`;
@@ -841,13 +915,14 @@ function normalizeParsedCandidate(candidate, index) {
     applied_date: candidate.applied_date === "today" || !candidate.applied_date ? todayText() : candidate.applied_date,
     reject_reason: candidate.reject_reason || "暂无",
     file_name: candidate.file_name || "待确认",
+    added_to_ledger: Boolean(candidate.added_to_ledger),
   };
 }
 
 function parsedCandidateToPipeline(candidate) {
   const role = candidate.suggested_role === "待人工确认" ? "待人工确认" : candidate.suggested_role;
   return {
-    candidate_id: candidate.candidate_id,
+    candidate_id: "",
     name: candidate.name,
     role,
     department: inferDepartment(role),
@@ -862,6 +937,8 @@ function parsedCandidateToPipeline(candidate) {
     offer_date: "",
     hire_date: "",
     reject_reason: candidate.reject_reason || "暂无",
+    ai_source_file: candidate.file_name || "",
+    ai_duplicate_key: parsedCandidateDuplicateKey(candidate),
   };
 }
 
@@ -1180,11 +1257,16 @@ function DataWorkflowPanel({ rows, onRowsLoaded, onSaveLocal, onLoadLocal, onCle
   );
 }
 
-function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandidates }) {
+function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandidates, ledgerRows }) {
   const [resumeFiles, setResumeFiles] = useState([]);
   const [resumeMessage, setResumeMessage] = useState("");
   const [resumeStatuses, setResumeStatuses] = useState([]);
   const [isParsing, setIsParsing] = useState(false);
+  const ledgerKeys = useMemo(() => ledgerDuplicateKeySet(ledgerRows), [ledgerRows]);
+
+  function isParsedCandidateAdded(candidate) {
+    return Boolean(candidate.added_to_ledger) || ledgerKeys.has(parsedCandidateDuplicateKey(candidate));
+  }
 
   function readTextFile(file) {
     return new Promise((resolve, reject) => {
@@ -1356,12 +1438,37 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
   }
 
   function addCandidatesToPipeline(candidates = parsedCandidates) {
+    const candidatesToAdd = candidates.filter((candidate) => !isParsedCandidateAdded(candidate));
+
     if (!candidates.length) {
       setResumeMessage("暂无可加入候选人台账的解析结果。");
       return;
     }
-    onAddCandidates(candidates.map(parsedCandidateToPipeline));
-    setResumeMessage(`已将${candidates.length}条解析结果加入候选人台账，所有分析已自动更新。`);
+
+    if (!candidatesToAdd.length) {
+      setResumeMessage("该候选人已在台账中，请勿重复加入。");
+      return;
+    }
+
+    const result = onAddCandidates(candidatesToAdd);
+    if (result?.addedKeys?.size) {
+      setParsedCandidates((current) =>
+        current.map((candidate) =>
+          result.addedKeys.has(parsedCandidateDuplicateKey(candidate))
+            ? { ...candidate, added_to_ledger: true }
+            : candidate
+        )
+      );
+    }
+
+    const messages = [];
+    if (result?.addedCount) {
+      messages.push(`已将${result.addedCount}条解析结果加入候选人台账，所有分析已自动更新。`);
+    }
+    if (result?.duplicateCount || candidatesToAdd.length < candidates.length) {
+      messages.push("该候选人已在台账中，请勿重复加入。");
+    }
+    setResumeMessage(messages.join(" "));
   }
 
   function exportParsedCsv() {
@@ -1441,35 +1548,42 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
           </thead>
           <tbody>
             {parsedCandidates.length ? (
-              parsedCandidates.map((candidate, index) => (
-                <tr key={`${candidate.candidate_id}-${index}`}>
-                  <td>{candidate.candidate_id}</td>
-                  <td><input value={candidate.name} onChange={(event) => updateParsedCandidate(index, "name", event.target.value)} /></td>
-                  <td>{candidate.school}</td>
-                  <td>{candidate.education_level}</td>
-                  <td>{candidate.major}</td>
-                  <td>{candidate.graduation_year}</td>
-                  <td>{arrayText(candidate.skills)}</td>
-                  <td>{arrayText(candidate.experience_keywords)}</td>
-                  <td>
-                    <select value={candidate.suggested_role} onChange={(event) => updateParsedCandidate(index, "suggested_role", event.target.value)}>
-                      {ROLE_OPTIONS.map((role) => <option key={role} value={role}>{role}</option>)}
-                    </select>
-                  </td>
-                  <td>{candidate.fit_reason}</td>
-                  <td>{arrayText(candidate.missing_information)}</td>
-                  <td>{candidate.file_name || "待确认"}</td>
-                  <td><input value={candidate.source} onChange={(event) => updateParsedCandidate(index, "source", normalizeSource(event.target.value))} /></td>
-                  <td><input value={candidate.recruiter} onChange={(event) => updateParsedCandidate(index, "recruiter", event.target.value)} /></td>
-                  <td>
-                    <select value={candidate.current_stage} onChange={(event) => updateParsedCandidate(index, "current_stage", event.target.value)}>
-                      {STAGE_OPTIONS.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
-                    </select>
-                  </td>
-                  <td><input type="date" value={candidate.applied_date} onChange={(event) => updateParsedCandidate(index, "applied_date", event.target.value)} /></td>
-                  <td><button type="button" onClick={() => addCandidatesToPipeline([candidate])}>加入台账</button></td>
-                </tr>
-              ))
+              parsedCandidates.map((candidate, index) => {
+                const added = isParsedCandidateAdded(candidate);
+                return (
+                    <tr key={`${candidate.candidate_id}-${index}`}>
+                      <td>{candidate.candidate_id}</td>
+                      <td><input value={candidate.name} onChange={(event) => updateParsedCandidate(index, "name", event.target.value)} /></td>
+                      <td>{candidate.school}</td>
+                      <td>{candidate.education_level}</td>
+                      <td>{candidate.major}</td>
+                      <td>{candidate.graduation_year}</td>
+                      <td>{arrayText(candidate.skills)}</td>
+                      <td>{arrayText(candidate.experience_keywords)}</td>
+                      <td>
+                        <select value={candidate.suggested_role} onChange={(event) => updateParsedCandidate(index, "suggested_role", event.target.value)}>
+                          {ROLE_OPTIONS.map((role) => <option key={role} value={role}>{role}</option>)}
+                        </select>
+                      </td>
+                      <td>{candidate.fit_reason}</td>
+                      <td>{arrayText(candidate.missing_information)}</td>
+                      <td>{candidate.file_name || "待确认"}</td>
+                      <td><input value={candidate.source} onChange={(event) => updateParsedCandidate(index, "source", normalizeSource(event.target.value))} /></td>
+                      <td><input value={candidate.recruiter} onChange={(event) => updateParsedCandidate(index, "recruiter", event.target.value)} /></td>
+                      <td>
+                        <select value={candidate.current_stage} onChange={(event) => updateParsedCandidate(index, "current_stage", event.target.value)}>
+                          {STAGE_OPTIONS.map((stage) => <option key={stage} value={stage}>{stage}</option>)}
+                        </select>
+                      </td>
+                      <td><input type="date" value={candidate.applied_date} onChange={(event) => updateParsedCandidate(index, "applied_date", event.target.value)} /></td>
+                      <td>
+                        <button type="button" disabled={added} onClick={() => addCandidatesToPipeline([candidate])}>
+                          {added ? "已加入" : "加入台账"}
+                        </button>
+                      </td>
+                    </tr>
+                );
+              })
             ) : (
               <tr>
                 <td colSpan="17" className="empty-cell">暂无AI解析结果。请上传PDF、DOCX或TXT简历并点击解析简历。</td>
@@ -1482,8 +1596,134 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
   );
 }
 
+function CandidateLedgerTable({
+  rows,
+  emptyText,
+  editingCandidateId,
+  draft,
+  onStartEdit,
+  onDraftChange,
+  onSaveEdit,
+  onCancelEdit,
+  onDelete,
+}) {
+  const headers = [
+    "编号",
+    "候选人",
+    "岗位",
+    "部门",
+    "城市",
+    "渠道",
+    "招聘负责人",
+    "当前阶段",
+    "投递日期",
+    "入职日期",
+    "淘汰/放弃原因",
+    "操作",
+  ];
+
+  function input(field, type = "text") {
+    return (
+      <input
+        className="ledger-edit-input"
+        type={type}
+        value={draft?.[field] || ""}
+        onChange={(event) => onDraftChange(field, event.target.value)}
+      />
+    );
+  }
+
+  function select(field, options, normalizer = (value) => value) {
+    const currentValue = draft?.[field] || "";
+    return (
+      <select
+        className="ledger-edit-input"
+        value={currentValue}
+        onChange={(event) => onDraftChange(field, normalizer(event.target.value))}
+      >
+        {optionListWithCurrent(options, currentValue).map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    );
+  }
+
+  return (
+    <div className="table-wrap candidate-ledger-wrap">
+      <table>
+        <thead>
+          <tr>
+            {headers.map((header) => (
+              <th key={header}>{header}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length ? (
+            rows.map((row) => {
+              const isEditing = editingCandidateId === row.candidate_id;
+              return (
+                <tr key={row.candidate_id} className={isEditing ? "editing-row" : ""}>
+                  <td>{row.candidate_id}</td>
+                  <td>{isEditing ? input("name") : row.name}</td>
+                  <td>{isEditing ? input("role") : row.role}</td>
+                  <td>{isEditing ? input("department") : row.department}</td>
+                  <td>{isEditing ? input("city") : row.city}</td>
+                  <td>{isEditing ? select("source", SOURCE_OPTIONS, normalizeSource) : row.source}</td>
+                  <td>{isEditing ? select("recruiter", RECRUITER_OPTIONS) : row.recruiter}</td>
+                  <td>
+                    {isEditing ? (
+                      select("current_stage", STAGE_OPTIONS)
+                    ) : (
+                      <span className={stageClassName(row.current_stage)}>{displayStage(row.current_stage)}</span>
+                    )}
+                  </td>
+                  <td>{isEditing ? input("applied_date", "date") : row.applied_date || "暂无"}</td>
+                  <td>{isEditing ? input("hire_date", "date") : row.hire_date || "暂无"}</td>
+                  <td>{isEditing ? input("reject_reason") : row.reject_reason || "暂无"}</td>
+                  <td>
+                    <div className="ledger-actions">
+                      {isEditing ? (
+                        <>
+                          <button type="button" className="table-action save-action" onClick={() => onSaveEdit(row.candidate_id)}>
+                            保存
+                          </button>
+                          <button type="button" className="table-action cancel-action" onClick={onCancelEdit}>
+                            取消
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" className="table-action edit-action" onClick={() => onStartEdit(row)}>
+                            编辑
+                          </button>
+                          <button type="button" className="table-action delete-action" onClick={() => onDelete(row)}>
+                            删除
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })
+          ) : (
+            <tr>
+              <td colSpan={headers.length} className="empty-cell">
+                {emptyText}
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function App() {
-  const [rows, setRows] = useState(SAMPLE_ROWS);
+  const [rows, setRows] = useState(() => ensureUniqueCandidateIds(SAMPLE_ROWS));
   const [fileName, setFileName] = useState(SAMPLE_FILE_NAME);
   const [dataSource, setDataSource] = useState("系统示例数据");
   const [dataWarning, setDataWarning] = useState("");
@@ -1494,6 +1734,9 @@ function App() {
   const [currentPage, setCurrentPage] = useState(1);
   const [parsedCandidates, setParsedCandidates] = useState([]);
   const [localMessage, setLocalMessage] = useState("");
+  const [editingCandidateId, setEditingCandidateId] = useState("");
+  const [candidateDraft, setCandidateDraft] = useState(null);
+  const [ledgerMessage, setLedgerMessage] = useState("");
 
   const dateFilteredRows = useMemo(() => filterRowsByAppliedDate(rows, dateFilter), [rows, dateFilter]);
   const analytics = useMemo(() => calculateAnalytics(dateFilteredRows), [dateFilteredRows]);
@@ -1537,23 +1780,132 @@ function App() {
   }, [currentPage, totalPages]);
 
   function handleRowsLoaded(nextRows, nextFileName, warnings = [], sourceType = "upload") {
-    setRows(nextRows);
+    setRows(ensureUniqueCandidateIds(prepareImportedRows(nextRows)));
     setFileName(nextFileName);
     setDataSource(sourceType === "sample" ? "系统示例数据" : "用户上传的候选人台账");
     setFilters({ role: "", source: "", recruiter: "", current_stage: "", search: "" });
     setDateFilter({ preset: "all", startDate: "", endDate: "" });
     setCurrentPage(1);
+    setEditingCandidateId("");
+    setCandidateDraft(null);
+    setLedgerMessage("");
     setDataWarning(warnings.join(" "));
   }
 
-  function addPipelineRows(newRows) {
-    const preparedRows = prepareImportedRows(newRows);
-    setRows((current) => [...current, ...preparedRows]);
-    setDataSource("用户上传的候选人台账");
-    setFileName("AI简历解析结果");
-    setFilters({ role: "", source: "", recruiter: "", current_stage: "", search: "" });
-    setDateFilter({ preset: "all", startDate: "", endDate: "" });
-    setCurrentPage(1);
+  function addPipelineRows(parsedRows) {
+    const existingKeys = ledgerDuplicateKeySet(rows);
+    const addedParsed = [];
+    const duplicateKeys = new Set();
+
+    (Array.isArray(parsedRows) ? parsedRows : []).forEach((candidate) => {
+      const key = parsedCandidateDuplicateKey(candidate);
+      if (!key || existingKeys.has(key)) {
+        duplicateKeys.add(key || candidate?.name || "duplicate");
+        return;
+      }
+
+      existingKeys.add(key);
+      addedParsed.push(candidate);
+    });
+
+    const preparedRows = ensureUniqueCandidateIds(
+      prepareImportedRows(addedParsed.map(parsedCandidateToPipeline)),
+      rows
+    );
+
+    if (preparedRows.length) {
+      setRows((current) => [...current, ...preparedRows]);
+      setDataSource("用户上传的候选人台账");
+      setFileName("AI简历解析结果");
+      setFilters({ role: "", source: "", recruiter: "", current_stage: "", search: "" });
+      setDateFilter({ preset: "all", startDate: "", endDate: "" });
+      setCurrentPage(1);
+    }
+
+    return {
+      addedCount: preparedRows.length,
+      duplicateCount: duplicateKeys.size,
+      addedKeys: new Set(addedParsed.map(parsedCandidateDuplicateKey)),
+      duplicateKeys,
+    };
+  }
+
+  function startCandidateEdit(row) {
+    setEditingCandidateId(row.candidate_id);
+    setCandidateDraft({
+      name: row.name || "",
+      role: row.role || "",
+      department: row.department || "",
+      city: row.city || "",
+      source: normalizeSource(row.source) || "",
+      recruiter: row.recruiter || "",
+      current_stage: displayStage(row.current_stage || "投递"),
+      applied_date: normalizeDate(row.applied_date),
+      hire_date: normalizeDate(row.hire_date),
+      reject_reason: row.reject_reason || "",
+    });
+    setLedgerMessage("");
+  }
+
+  function updateCandidateDraft(field, value) {
+    setCandidateDraft((current) => ({ ...(current || {}), [field]: value }));
+  }
+
+  function cancelCandidateEdit() {
+    setEditingCandidateId("");
+    setCandidateDraft(null);
+    setLedgerMessage("");
+  }
+
+  function saveCandidateEdit(candidateId) {
+    if (!candidateDraft) return;
+
+    const appliedDateText = String(candidateDraft.applied_date || "").trim();
+    const hireDateText = String(candidateDraft.hire_date || "").trim();
+    const appliedDate = normalizeDate(appliedDateText);
+    const hireDate = normalizeDate(hireDateText);
+
+    if (appliedDateText && !appliedDate) {
+      setLedgerMessage("投递日期格式无法识别，请使用YYYY-MM-DD格式。");
+      return;
+    }
+
+    if (hireDateText && !hireDate) {
+      setLedgerMessage("入职日期格式无法识别，请使用YYYY-MM-DD格式。");
+      return;
+    }
+
+    const nextValues = {
+      name: String(candidateDraft.name || "").trim() || "Candidate 待确认",
+      role: String(candidateDraft.role || "").trim() || "待人工确认",
+      department: String(candidateDraft.department || "").trim() || inferDepartment(candidateDraft.role),
+      city: String(candidateDraft.city || "").trim() || "待确认",
+      source: normalizeSource(candidateDraft.source) || "待确认",
+      recruiter: String(candidateDraft.recruiter || "").trim() || SAMPLE_RECRUITERS[0],
+      current_stage: displayStage(candidateDraft.current_stage || "投递"),
+      applied_date: appliedDate,
+      hire_date: hireDate,
+      reject_reason: String(candidateDraft.reject_reason || "").trim(),
+    };
+
+    setRows((current) =>
+      current.map((row) => (row.candidate_id === candidateId ? { ...row, ...nextValues } : row))
+    );
+    setEditingCandidateId("");
+    setCandidateDraft(null);
+    setLedgerMessage("已保存候选人记录，招聘漏斗数据已更新。");
+  }
+
+  function deleteCandidate(row) {
+    const confirmed = window.confirm("确认删除该候选人记录吗？删除后将重新计算招聘漏斗数据。");
+    if (!confirmed) return;
+
+    setRows((current) => current.filter((candidate) => candidate.candidate_id !== row.candidate_id));
+    if (editingCandidateId === row.candidate_id) {
+      setEditingCandidateId("");
+      setCandidateDraft(null);
+    }
+    setLedgerMessage("已删除候选人记录，招聘漏斗数据已重新计算。");
   }
 
   function saveLocalData(currentRows) {
@@ -1563,6 +1915,7 @@ function App() {
         rows: currentRows,
         fileName,
         dataSource,
+        parsedCandidates,
         savedAt: new Date().toISOString(),
       })
     );
@@ -1580,6 +1933,7 @@ function App() {
       const parsed = JSON.parse(saved);
       handleRowsLoaded(prepareImportedRows(parsed.rows || []), parsed.fileName || "本地保存数据", [], "upload");
       setDataSource(parsed.dataSource || "用户上传的候选人台账");
+      setParsedCandidates((parsed.parsedCandidates || []).map(normalizeParsedCandidate));
       setLocalMessage("已读取本地保存数据。");
     } catch (error) {
       setLocalMessage("本地保存数据读取失败，请清空后重新保存。");
@@ -1639,24 +1993,6 @@ function App() {
     },
   ];
 
-  const candidateColumns = [
-    { key: "candidate_id", label: "编号" },
-    { key: "name", label: "候选人" },
-    { key: "role", label: "岗位" },
-    { key: "department", label: "部门" },
-    { key: "city", label: "城市" },
-    { key: "source", label: "渠道" },
-    { key: "recruiter", label: "招聘负责人" },
-    {
-      key: "current_stage",
-      label: "当前阶段",
-      render: (row) => <span className={stageClassName(row.current_stage)}>{displayStage(row.current_stage)}</span>,
-    },
-    { key: "applied_date", label: "投递日期", render: (row) => row.applied_date || "暂无" },
-    { key: "hire_date", label: "入职日期", render: (row) => row.hire_date || "暂无" },
-    { key: "reject_reason", label: "淘汰/放弃原因", render: (row) => row.reject_reason || "暂无" },
-  ];
-
   return (
     <main>
       <UploadPanel onRowsLoaded={handleRowsLoaded} fileName={fileName} error={dataWarning} dataSource={dataSource} />
@@ -1674,6 +2010,7 @@ function App() {
         parsedCandidates={parsedCandidates}
         setParsedCandidates={setParsedCandidates}
         onAddCandidates={addPipelineRows}
+        ledgerRows={rows}
       />
 
       <DateRangeFilter
@@ -1900,7 +2237,20 @@ function App() {
             清空
           </button>
         </div>
-        <DataTable columns={candidateColumns} rows={paginatedRows} emptyText="没有候选人符合当前筛选条件。" />
+        {ledgerMessage ? (
+          <p className={ledgerMessage.includes("无法") ? "warning-text" : "success-text"}>{ledgerMessage}</p>
+        ) : null}
+        <CandidateLedgerTable
+          rows={paginatedRows}
+          emptyText="没有候选人符合当前筛选条件。"
+          editingCandidateId={editingCandidateId}
+          draft={candidateDraft}
+          onStartEdit={startCandidateEdit}
+          onDraftChange={updateCandidateDraft}
+          onSaveEdit={saveCandidateEdit}
+          onCancelEdit={cancelCandidateEdit}
+          onDelete={deleteCandidate}
+        />
         <div className="pagination-bar">
           <label className="page-size-control">
             <span>每页显示</span>

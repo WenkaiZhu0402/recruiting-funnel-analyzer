@@ -771,6 +771,61 @@ tbody tr:last-child td {
   color: #64748b;
 }
 
+.candidate-ledger-wrap {
+  margin-top: 10px;
+}
+
+.editing-row {
+  background: #f8fbff;
+}
+
+.ledger-edit-input {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #172033;
+  font: inherit;
+  min-height: 34px;
+  min-width: 130px;
+  padding: 0 8px;
+}
+
+.ledger-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.table-action {
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 800;
+  min-height: 30px;
+  padding: 0 9px;
+}
+
+.edit-action {
+  border-color: #bfdbfe;
+  color: #1d4ed8;
+}
+
+.save-action {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.cancel-action {
+  color: #64748b;
+}
+
+.delete-action {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
 .pagination-bar {
   align-items: center;
   display: flex;
