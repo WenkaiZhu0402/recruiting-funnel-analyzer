@@ -12,7 +12,9 @@
     "react-dom": "latest",
     "recharts": "latest",
     "lucide-react": "latest",
-    "papaparse": "latest"
+    "papaparse": "latest",
+    "mammoth": "latest",
+    "pdfjs-dist": "latest"
   },
   "devDependencies": {}
 }

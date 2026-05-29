@@ -840,6 +840,7 @@ function normalizeParsedCandidate(candidate, index) {
     current_stage: displayStage(candidate.current_stage || "投递"),
     applied_date: candidate.applied_date === "today" || !candidate.applied_date ? todayText() : candidate.applied_date,
     reject_reason: candidate.reject_reason || "暂无",
+    file_name: candidate.file_name || "待确认",
   };
 }
 
@@ -1182,6 +1183,7 @@ function DataWorkflowPanel({ rows, onRowsLoaded, onSaveLocal, onLoadLocal, onCle
 function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandidates }) {
   const [resumeFiles, setResumeFiles] = useState([]);
   const [resumeMessage, setResumeMessage] = useState("");
+  const [resumeStatuses, setResumeStatuses] = useState([]);
   const [isParsing, setIsParsing] = useState(false);
 
   function readTextFile(file) {
@@ -1193,62 +1195,154 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
     });
   }
 
+  function readArrayBufferFile(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (event) => resolve(event.target.result);
+      reader.onerror = () => reject(new Error("文件读取失败"));
+      reader.readAsArrayBuffer(file);
+    });
+  }
+
+  function updateResumeStatus(fileId, status, type = "info") {
+    setResumeStatuses((current) =>
+      current.map((item) => (item.id === fileId ? { ...item, status, type } : item))
+    );
+  }
+
+  function getResumeExtension(fileName) {
+    return String(fileName || "").split(".").pop().toLowerCase();
+  }
+
+  async function extractTxtResume(file) {
+    const text = (await readTextFile(file)).trim();
+    if (!text) throw new Error("该TXT文件未能提取到有效文本，请检查文件内容后重试。");
+    return text;
+  }
+
+  async function extractDocxResume(file) {
+    if (!window.mammoth?.extractRawText) {
+      throw new Error("DOCX解析库加载失败，请刷新页面后重试。");
+    }
+
+    const arrayBuffer = await readArrayBufferFile(file);
+    const result = await window.mammoth.extractRawText({ arrayBuffer });
+    const text = String(result.value || "").trim();
+    if (!text) throw new Error("该DOCX文件未能提取到有效文本，请检查文件内容后重试。");
+    return text;
+  }
+
+  async function extractPdfResume(file) {
+    if (!window.pdfjsLib?.getDocument) {
+      throw new Error("PDF解析库加载失败，请刷新页面后重试。");
+    }
+
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+    const arrayBuffer = await readArrayBufferFile(file);
+    const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+    const pageTexts = [];
+
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const content = await page.getTextContent();
+      const text = content.items.map((item) => item.str || "").join(" ").trim();
+      if (text) pageTexts.push(text);
+    }
+
+    const text = pageTexts.join("\n").trim();
+    if (!text) {
+      throw new Error("该PDF可能是扫描版或图片版，暂时无法提取文字。请上传文字版PDF、DOCX或TXT文件。");
+    }
+    return text;
+  }
+
+  async function extractResumeText(resume) {
+    if (resume.extension === "txt") return extractTxtResume(resume.file);
+    if (resume.extension === "docx") return extractDocxResume(resume.file);
+    if (resume.extension === "pdf") return extractPdfResume(resume.file);
+    throw new Error("文件格式暂不支持，请上传PDF、DOCX或TXT文件。");
+  }
+
   async function handleResumeFiles(event) {
     const files = Array.from(event.target.files || []);
+    const supportedExtensions = ["pdf", "docx", "txt"];
     const prepared = [];
     const warnings = [];
 
-    for (const file of files) {
-      const extension = file.name.split(".").pop().toLowerCase();
-      if (extension === "txt") {
-        try {
-          prepared.push({ name: file.name, text: await readTextFile(file), status: "待解析" });
-        } catch (error) {
-          warnings.push(`${file.name}读取失败，请检查文件编码或重新上传。`);
-        }
-      } else if (["pdf", "docx"].includes(extension)) {
-        warnings.push(`${file.name}暂不支持在浏览器内稳定解析，请先另存为TXT后上传。`);
+    files.forEach((file, index) => {
+      const extension = getResumeExtension(file.name);
+      const id = `${file.name}-${file.size}-${file.lastModified}-${index}`;
+      if (supportedExtensions.includes(extension)) {
+        prepared.push({ id, name: file.name, file, extension, status: "待解析" });
       } else {
-        warnings.push(`${file.name}格式暂不支持，请上传TXT、PDF或DOCX文件。`);
+        warnings.push(`${file.name}格式暂不支持，请上传PDF、DOCX或TXT文件。`);
       }
-    }
+    });
 
     setResumeFiles(prepared);
-    setResumeMessage(warnings.join(" "));
+    setResumeStatuses([
+      ...prepared.map((file) => ({ id: file.id, name: file.name, status: "待解析", type: "info" })),
+      ...warnings.map((warning, index) => ({ id: `warning-${index}`, name: "文件提醒", status: warning, type: "warning" })),
+    ]);
+    setResumeMessage(
+      [
+        prepared.length ? `已选择${prepared.length}个简历文件，点击“解析简历”开始处理。` : "",
+        ...warnings,
+      ]
+        .filter(Boolean)
+        .join(" ")
+    );
     event.target.value = "";
   }
 
   async function parseResumes() {
     if (!resumeFiles.length) {
-      setResumeMessage("请先上传TXT格式简历文件。PDF/DOCX如无法解析，请另存为TXT后再试。");
+      setResumeMessage("请先上传PDF、DOCX或TXT简历文件。");
       return;
     }
 
     setIsParsing(true);
     const nextCandidates = [];
     const warnings = [];
+    setResumeMessage("正在读取文件……");
 
     for (const [index, resume] of resumeFiles.entries()) {
       try {
+        updateResumeStatus(resume.id, "正在读取文件……");
+        updateResumeStatus(resume.id, "正在提取简历文本……");
+        const resumeText = await extractResumeText(resume);
+        updateResumeStatus(resume.id, "正在调用AI解析……");
+        setResumeMessage(`正在调用AI解析：${resume.name}`);
+
         const response = await fetch("/api/parse-resume", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ resumeText: resume.text, fileName: resume.name, index }),
+          body: JSON.stringify({ resumeText, fileName: resume.name, index }),
         });
         const payload = await response.json();
         if (!response.ok) {
-          warnings.push(payload.error || `${resume.name}解析失败。`);
+          const message = payload.error || `${resume.name}解析失败，请检查文件格式或稍后重试。`;
+          warnings.push(`${resume.name}：${message}`);
+          updateResumeStatus(resume.id, message, "warning");
           continue;
         }
-        nextCandidates.push(normalizeParsedCandidate(payload.candidate, parsedCandidates.length + nextCandidates.length));
+        nextCandidates.push(
+          normalizeParsedCandidate(
+            { ...payload.candidate, file_name: resume.name },
+            parsedCandidates.length + nextCandidates.length
+          )
+        );
+        updateResumeStatus(resume.id, "解析完成", "success");
       } catch (error) {
-        warnings.push(`${resume.name}解析失败，请确认本地API服务正在运行。`);
+        const message = error.message || "解析失败，请检查文件格式或稍后重试。";
+        warnings.push(`${resume.name}：${message}`);
+        updateResumeStatus(resume.id, message, "warning");
       }
     }
 
     setParsedCandidates((current) => [...current, ...nextCandidates]);
     setResumeMessage(
-      [nextCandidates.length ? `已生成${nextCandidates.length}条候选人解析记录，请人工复核后再加入台账。` : "", ...warnings]
+      [nextCandidates.length ? `解析完成，已生成${nextCandidates.length}条候选人解析记录，请人工复核后再加入台账。` : "", ...warnings]
         .filter(Boolean)
         .join(" ")
     );
@@ -1292,6 +1386,7 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
       current_stage: candidate.current_stage,
       applied_date: candidate.applied_date,
       reject_reason: candidate.reject_reason,
+      file_name: candidate.file_name || "待确认",
     }));
     downloadCsvFile(exportRows, Object.keys(exportRows[0]), "AI简历解析结果.csv");
   }
@@ -1306,25 +1401,40 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
       </div>
       <div className="resume-copy">
         <p>上传候选人简历后，系统会使用 AI 提取教育背景、技能关键词、经历关键词和可能匹配的岗位方向，并生成候选人台账记录。该功能仅用于信息整理，不用于自动筛选、候选人排序、自动淘汰或录用决策。</p>
+        <p>支持 PDF、DOCX 和 TXT 简历文件。系统会先提取简历文本，再使用 AI 生成候选人台账记录。</p>
         <p className="privacy-note">请勿在公开演示中上传真实候选人简历。建议使用虚拟或脱敏简历进行测试。</p>
-        <p className="privacy-note">AI解析结果仅供HR整理台账和初步了解候选人背景使用，不代表录用建议，也不应作为自动筛选、排序或淘汰候选人的依据。</p>
+        <p className="privacy-note">AI解析结果仅用于HR整理台账和初步了解候选人背景，不代表录用建议，也不应作为自动筛选、排序或淘汰候选人的依据。</p>
       </div>
       <div className="resume-actions">
         <label htmlFor="resume-files">上传简历文件</label>
-        <input id="resume-files" type="file" multiple accept=".txt,.pdf,.docx,text/plain,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onChange={handleResumeFiles} />
+        <input id="resume-files" type="file" multiple accept=".pdf,.docx,.txt" onChange={handleResumeFiles} />
         <button type="button" onClick={parseResumes} disabled={isParsing}>{isParsing ? "解析中..." : "解析简历"}</button>
         <button type="button" onClick={() => addCandidatesToPipeline()}>加入候选人台账</button>
         <button type="button" onClick={exportParsedCsv}>导出解析结果CSV</button>
         <button type="button" onClick={() => setParsedCandidates([])}>清空解析结果</button>
       </div>
-      {resumeFiles.length ? <p className="success-text">已选择{resumeFiles.length}个可解析TXT文件。</p> : null}
-      {resumeMessage ? <p className={resumeMessage.includes("失败") || resumeMessage.includes("未检测") || resumeMessage.includes("暂不支持") ? "warning-text" : "success-text"}>{resumeMessage}</p> : null}
+      {resumeFiles.length ? <p className="success-text">已选择{resumeFiles.length}个可解析简历文件。</p> : null}
+      {resumeMessage ? (
+        <p className={resumeMessage.includes("失败") || resumeMessage.includes("未检测") || resumeMessage.includes("暂不支持") || resumeMessage.includes("无法") || resumeMessage.includes("未能") ? "warning-text" : "success-text"}>
+          {resumeMessage}
+        </p>
+      ) : null}
+      {resumeStatuses.length ? (
+        <ul className="resume-status-list">
+          {resumeStatuses.map((item) => (
+            <li key={item.id} className={item.type === "warning" ? "warning-status" : item.type === "success" ? "success-status" : ""}>
+              <span>{item.name}</span>
+              <strong>{item.status}</strong>
+            </li>
+          ))}
+        </ul>
+      ) : null}
 
       <div className="table-wrap parsed-table-wrap">
         <table>
           <thead>
             <tr>
-              {["候选人编号", "候选人名称", "学校", "学历", "专业", "毕业年份", "技能关键词", "经历关键词", "建议岗位", "匹配理由", "信息缺口", "招聘渠道", "招聘负责人", "当前阶段", "投递日期", "操作"].map((header) => (
+              {["候选人编号", "候选人名称", "学校", "学历", "专业", "毕业年份", "技能关键词", "经历关键词", "建议岗位", "匹配理由", "信息缺口", "文件名", "招聘渠道", "招聘负责人", "当前阶段", "投递日期", "操作"].map((header) => (
                 <th key={header}>{header}</th>
               ))}
             </tr>
@@ -1348,6 +1458,7 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
                   </td>
                   <td>{candidate.fit_reason}</td>
                   <td>{arrayText(candidate.missing_information)}</td>
+                  <td>{candidate.file_name || "待确认"}</td>
                   <td><input value={candidate.source} onChange={(event) => updateParsedCandidate(index, "source", normalizeSource(event.target.value))} /></td>
                   <td><input value={candidate.recruiter} onChange={(event) => updateParsedCandidate(index, "recruiter", event.target.value)} /></td>
                   <td>
@@ -1361,7 +1472,7 @@ function ResumeParserPanel({ parsedCandidates, setParsedCandidates, onAddCandida
               ))
             ) : (
               <tr>
-                <td colSpan="16" className="empty-cell">暂无AI解析结果。请上传TXT简历并点击解析简历。</td>
+                <td colSpan="17" className="empty-cell">暂无AI解析结果。请上传PDF、DOCX或TXT简历并点击解析简历。</td>
               </tr>
             )}
           </tbody>

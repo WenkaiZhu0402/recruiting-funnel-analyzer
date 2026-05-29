@@ -468,6 +468,48 @@ h2 {
   color: #c2410c;
 }
 
+.resume-status-list {
+  display: grid;
+  gap: 8px;
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+}
+
+.resume-status-list li {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  color: #475569;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 9px 12px;
+}
+
+.resume-status-list span {
+  color: #172033;
+  font-weight: 700;
+}
+
+.resume-status-list strong {
+  font-size: 0.9rem;
+  text-align: right;
+}
+
+.resume-status-list .success-status {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #15803d;
+}
+
+.resume-status-list .warning-status {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #c2410c;
+}
+
 .privacy-note {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
